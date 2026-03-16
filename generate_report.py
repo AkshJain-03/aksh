@@ -76,25 +76,33 @@ def parse_accuracy(outputs):
 
 
 def parse_areas(outputs):
-    """Extract area statistics from cell outputs."""
+    """Extract area statistics from cell outputs.
+
+    Looks for the summary table printed by the notebook, which has lines like:
+        Built-up               115.3    134.5    101.3    145.2    152.8
+    Returns keyed by class and year, e.g. AREA_Built-up_2015 = '115.3'.
+    """
     vals = {}
+    years = [2015, 2020, 2025, 2030, 2035]
+    classes = [
+        "Built-up",
+        "Dense Vegetation",
+        "Sparse Vegetation",
+        "Water Body",
+        "Open Land",
+    ]
     for _, source, text in outputs:
-        if "LULC AREA" not in text and "2015 km²" not in text:
+        # Detect area table by looking for year headers or LULC AREA heading
+        if not re.search(r"\b(2015|2020|2025)\b.*\b(2020|2025|2030)\b", text):
             continue
-        for cls in [
-            "Built-up",
-            "Dense Vegetation",
-            "Sparse Vegetation",
-            "Water Body",
-            "Open Land",
-        ]:
-            # Match lines like:  Built-up           123.4   27.0%   134.5   ...
-            pattern = re.escape(cls) + r"\s+([\d.]+)\s+"
+        for cls in classes:
             matches = re.findall(
                 re.escape(cls) + r"\s+([\d.]+)", text
             )
             if matches:
-                vals[f"AREA_{cls}"] = matches  # list of values across years
+                for idx, val in enumerate(matches):
+                    if idx < len(years):
+                        vals[f"AREA_{cls}_{years[idx]}"] = val
     return vals
 
 
@@ -118,25 +126,30 @@ def parse_correlations(outputs):
 
 
 def populate_report(report_path, accuracy, areas, correlations, output_path):
-    """Replace placeholders in the report template with extracted values."""
+    """Replace placeholders in the report template with extracted values.
+
+    Handles three placeholder patterns used in the template:
+      *[notebook]*  *[from notebook]*  *[from notebook output]*
+    """
     with open(report_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Replace accuracy placeholders
-    if "OA" in accuracy:
-        content = content.replace(
-            "*[from notebook output]*",
-            f"{accuracy['OA']}%",
-            1,
-        )
-    # Generic notebook placeholders — replace with found values where possible
-    replacements_done = 0
-    for key, val in accuracy.items():
-        # Simple display
-        placeholder = f"*[from notebook]*"
-        if placeholder in content and replacements_done < 20:
-            content = content.replace(placeholder, str(val), 1)
-            replacements_done += 1
+    # Build a flat mapping of all extracted values for ordered replacement
+    all_vals = {}
+    all_vals.update(accuracy)
+    all_vals.update(areas)
+    all_vals.update(correlations)
+
+    # Replace all placeholder variants with extracted values sequentially
+    placeholder_patterns = ["*[from notebook output]*", "*[from notebook]*", "*[notebook]*"]
+    val_iter = iter(all_vals.values())
+    for pattern in placeholder_patterns:
+        while pattern in content:
+            val = next(val_iter, None)
+            if val is None:
+                break
+            display = str(val) if not isinstance(val, list) else ", ".join(str(v) for v in val)
+            content = content.replace(pattern, display, 1)
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(content)
@@ -157,10 +170,9 @@ def main():
         sys.exit(1)
 
     nb_path = sys.argv[1]
-    report_path = os.path.join(os.path.dirname(nb_path) or ".", "Mumbai_LULC_Report.md")
-    output_path = os.path.join(
-        os.path.dirname(nb_path) or ".", "Mumbai_LULC_Report_Populated.md"
-    )
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    report_path = os.path.join(script_dir, "Mumbai_LULC_Report.md")
+    output_path = os.path.join(script_dir, "Mumbai_LULC_Report_Populated.md")
 
     if not os.path.exists(nb_path):
         print(f"Error: Notebook not found: {nb_path}")
@@ -210,7 +222,8 @@ def main():
         print(f"\nNote: {output_path} still has *[notebook]* placeholders.")
         print("Run the notebook first to get actual values.")
     else:
-        remaining = open(output_path).read().count("*[notebook]*")
+        with open(output_path, "r", encoding="utf-8") as f:
+            remaining = f.read().count("*[notebook]*")
         if remaining > 0:
             print(f"\nNote: {remaining} placeholders could not be auto-filled.")
             print("These may require manual entry from the notebook output.")
